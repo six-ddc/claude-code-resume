@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// claude-code-resume — fzf-style picker for Claude Code sessions
+// ccresume (claude-code-resume) — fzf-style picker for Claude Code sessions
 //
-// claude-code-resume options:
+// ccresume options:
 //   --all                  search every project on disk
 //   --cwd <path>           specific project cwd (default: $PWD)
 //   --no-transcript        skip transcript-body indexing (faster, metadata only)
@@ -13,8 +13,8 @@
 //
 // Unknown flags pass through to fzf. FZF_DEFAULT_OPTS is respected.
 //
-// Self-dispatches: `claude-code-resume preview <sessionId> <jsonlPath> <query>` is
-// invoked by fzf for the preview pane; `claude-code-resume toggle-mode` flips
+// Self-dispatches: `ccresume preview <sessionId> <jsonlPath> <query>` is
+// invoked by fzf for the preview pane; `ccresume toggle-mode` flips
 // preview filter/full mode. Internal — don't invoke directly.
 
 import { mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises'
@@ -386,7 +386,7 @@ const OWN_BOOL_FLAGS = new Set(['--all', '--no-transcript', '--dump'])
 const OWN_VALUE_FLAGS = new Set(['--cwd', '--action'])
 
 function die(msg: string): never {
-  console.error(`claude-code-resume: ${msg}`)
+  console.error(`ccresume: ${msg}`)
   console.error(`(try --help)`)
   exit(2)
 }
@@ -414,7 +414,7 @@ function parseArgs(rest: string[]): Args {
       exit(0)
     }
     if (tok === '--version') {
-      console.log(`claude-code-resume ${VERSION}`)
+      console.log(`ccresume ${VERSION}`)
       exit(0)
     }
     const eq = tok.indexOf('=')
@@ -499,12 +499,12 @@ function parseArgs(rest: string[]): Args {
 
 function printHelp() {
   const noClip = clipboardShellPipeline() ? '' : `\n  (no clipboard backend found; install pbcopy/wl-copy/xclip/xsel for ctrl-y)`
-  console.log(`claude-code-resume ${VERSION} — fzf picker for Claude Code sessions
+  console.log(`ccresume ${VERSION} — fzf picker for Claude Code sessions
 
 Usage:
-  claude-code-resume [options] [query] [-- ...fzf args]
+  ccresume [options] [query] [-- ...fzf args]
 
-claude-code-resume options:
+ccresume options:
   --all                  search every project on disk
   --cwd <path>           specific project cwd (default: $PWD)
   --no-transcript        skip transcript-body indexing (faster, metadata only)
@@ -520,16 +520,16 @@ claude-code-resume options:
 Pass-through to fzf:
   Any unknown flag is forwarded to fzf verbatim. fzf options that take
   a value must use --flag=value form (or sit after \`--\`), because
-  claude-code-resume can't tell unfamiliar value flags from boolean ones.
+  ccresume can't tell unfamiliar value flags from boolean ones.
 
   Examples:
-    claude-code-resume --preview-window=down:70%:wrap
-    claude-code-resume --height=80% --layout=default
-    claude-code-resume --bind=ctrl-r:reload(echo)
-    claude-code-resume --exact                      # exact-match only
-    claude-code-resume --algo=v1                    # faster, less smart matching
-    claude-code-resume --no-mouse                   # disable mouse
-    claude-code-resume "query" -- --color=bw        # everything after -- is fzf
+    ccresume --preview-window=down:70%:wrap
+    ccresume --height=80% --layout=default
+    ccresume --bind=ctrl-r:reload(echo)
+    ccresume --exact                      # exact-match only
+    ccresume --algo=v1                    # faster, less smart matching
+    ccresume --no-mouse                   # disable mouse
+    ccresume "query" -- --color=bw        # everything after -- is fzf
 
 fzf env vars are respected unchanged:
   FZF_DEFAULT_OPTS       applied as usual
@@ -551,14 +551,14 @@ Preview scroll:
   PgUp / PgDn       one screen
 
 Shell composition:
-  claude --resume "$(claude-code-resume)"             # single-cwd mode
-  read cwd id <<< "$(claude-code-resume --all)"       # cd "$cwd" && claude --resume "$id"
+  claude --resume "$(ccresume)"             # single-cwd mode
+  read cwd id <<< "$(ccresume --all)"       # cd "$cwd" && claude --resume "$id"
 
-Note: don't pass \`-q\` to claude-code-resume; bare positionals are the query.
+Note: don't pass \`-q\` to ccresume; bare positionals are the query.
 
 Internal subcommands (used by fzf bindings, do not invoke directly):
-  claude-code-resume preview <sessionId> <path> <query>
-  claude-code-resume toggle-mode`)
+  ccresume preview <sessionId> <path> <query>
+  ccresume toggle-mode`)
 }
 
 // ── launcher ─────────────────────────────────────────────────────────────────
@@ -644,7 +644,7 @@ async function runLauncher(args: Args) {
   // fighting over the same alt-t mode. /tmp is auto-cleaned by the OS;
   // we still unlink on exit for tidiness.
   const sessionToken = Math.random().toString(36).slice(2, 10)
-  const stateFile = join(tmpdir(), `claude-code-resume-${sessionToken}`)
+  const stateFile = join(tmpdir(), `ccresume-${sessionToken}`)
 
   const previewCmd = `${SELF_INVOCATION} preview {2} {3} {q}`
   const toggleCmd = `${SELF_INVOCATION} toggle-mode`
@@ -685,7 +685,7 @@ async function runLauncher(args: Args) {
   if (args.query) fzfArgs.push('-q', args.query)
 
   // We don't touch FZF_DEFAULT_OPTS — user's dotfile defaults apply.
-  const env = { ...process.env, CLAUDE_CODE_RESUME_STATE_FILE: stateFile }
+  const env = { ...process.env, CCRESUME_STATE_FILE: stateFile }
 
   try {
     const fzf = Bun.spawn(['fzf', ...fzfArgs], {
@@ -771,7 +771,7 @@ function stateFilePath(): string {
   // Set by the launcher per-invocation. Fall back to a global path if
   // someone runs the preview subcommand directly (which they
   // shouldn't, but we don't want to crash).
-  return process.env.CLAUDE_CODE_RESUME_STATE_FILE || join(homedir(), '.cache', 'claude-code-resume', 'preview-mode')
+  return process.env.CCRESUME_STATE_FILE || join(homedir(), '.cache', 'ccresume', 'preview-mode')
 }
 
 async function readPreviewMode(): Promise<PreviewMode> {

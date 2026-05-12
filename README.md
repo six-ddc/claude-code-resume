@@ -1,5 +1,7 @@
 # claude-code-resume
 
+> Installs as the `ccresume` command — short prefix, no collision with `claude`.
+
 fzf-style picker for Claude Code sessions, with **highlighted-match preview** so you can confirm the right session before selecting it.
 
 Inspired by Claude Code's built-in `/resume` picker, but adds a live preview pane that scrolls through every message body matching your query — so you don't have to open the wrong session twice.
@@ -25,7 +27,7 @@ Or symlink the source if you prefer no build step:
 
 ```bash
 chmod +x src/claude-code-resume.ts
-ln -sf "$PWD/src/claude-code-resume.ts" ~/.local/bin/claude-code-resume
+ln -sf "$PWD/src/claude-code-resume.ts" ~/.local/bin/ccresume
 ```
 
 Requires `bun >= 1.1` and `fzf >= 0.40`. Clipboard support is auto-detected: `pbcopy` on macOS, `clip` on Windows, `wl-copy`/`xclip`/`xsel` on Linux. Without one of these the `ctrl-y` binding is silently disabled — everything else still works.
@@ -33,46 +35,46 @@ Requires `bun >= 1.1` and `fzf >= 0.40`. Clipboard support is auto-detected: `pb
 ## Usage
 
 ```bash
-claude-code-resume                              # sessions in current cwd
-claude-code-resume wsgi.input                   # pre-fill the query
-claude-code-resume --all                        # every project on disk
-claude-code-resume --cwd /path/to/proj          # specific cwd
-claude-code-resume --no-transcript              # skip transcript-body indexing (faster, metadata only)
-claude-code-resume --action resume              # exec `claude --resume <id>` on select
-claude-code-resume --action path                # print full .jsonl path
-claude-code-resume --action copy                # copy sessionId to clipboard
-claude-code-resume --dump                       # debug: print the TSV fed to fzf, then exit
-claude-code-resume --version
+ccresume                              # sessions in current cwd
+ccresume wsgi.input                   # pre-fill the query
+ccresume --all                        # every project on disk
+ccresume --cwd /path/to/proj          # specific cwd
+ccresume --no-transcript              # skip transcript-body indexing (faster, metadata only)
+ccresume --action resume              # exec `claude --resume <id>` on select
+ccresume --action path                # print full .jsonl path
+ccresume --action copy                # copy sessionId to clipboard
+ccresume --dump                       # debug: print the TSV fed to fzf, then exit
+ccresume --version
 ```
 
 Default action: print `sessionId` to stdout. Compose freely:
 
 ```bash
-claude --resume "$(claude-code-resume)"                 # single-cwd mode
-read cwd id <<< "$(claude-code-resume --all)"           # then: cd "$cwd" && claude --resume "$id"
+claude --resume "$(ccresume)"                 # single-cwd mode
+read cwd id <<< "$(ccresume --all)"           # then: cd "$cwd" && claude --resume "$id"
 ```
 
 ## Passing options to fzf
 
-Unknown flags are forwarded to fzf verbatim. fzf options that take a value must use `--flag=value` form (or sit after `--`), because claude-code-resume can't tell unfamiliar value flags from boolean ones.
+Unknown flags are forwarded to fzf verbatim. fzf options that take a value must use `--flag=value` form (or sit after `--`), because ccresume can't tell unfamiliar value flags from boolean ones.
 
 ```bash
 # layout
-claude-code-resume --preview-window=down:70%:wrap
-claude-code-resume --height=80% --layout=default
+ccresume --preview-window=down:70%:wrap
+ccresume --height=80% --layout=default
 
 # matching behavior
-claude-code-resume --exact                    # exact-match only
-claude-code-resume --algo=v1                  # faster, less smart matching
-claude-code-resume --case-sensitive
+ccresume --exact                    # exact-match only
+ccresume --algo=v1                  # faster, less smart matching
+ccresume --case-sensitive
 
 # input/UI
-claude-code-resume --no-mouse                 # disable mouse capture
-claude-code-resume --color=bw                 # monochrome
-claude-code-resume --bind=ctrl-r:reload(echo)
+ccresume --no-mouse                 # disable mouse capture
+ccresume --color=bw                 # monochrome
+ccresume --bind=ctrl-r:reload(echo)
 
 # anything tricky → put it after --
-claude-code-resume "myquery" -- --preview-window=hidden --no-mouse
+ccresume "myquery" -- --preview-window=hidden --no-mouse
 ```
 
 Common fzf options worth knowing about:
@@ -88,9 +90,9 @@ Common fzf options worth knowing about:
 | `--no-mouse` | disable mouse, recover native terminal text selection |
 | `--color=bw` | monochrome |
 
-`FZF_DEFAULT_OPTS` is respected — your dotfile defaults apply. `FZF_DEFAULT_COMMAND` is ignored (claude-code-resume feeds fzf via stdin).
+`FZF_DEFAULT_OPTS` is respected — your dotfile defaults apply. `FZF_DEFAULT_COMMAND` is ignored (ccresume feeds fzf via stdin).
 
-> Tip: don't pass `-q` to claude-code-resume; bare positionals are the query.
+> Tip: don't pass `-q` to ccresume; bare positionals are the query.
 
 ## Inside fzf
 
@@ -113,7 +115,7 @@ Search syntax is fzf's default: space-separated AND tokens, `'word` exact, `^pre
 1. Resolves the project dir from cwd using Claude Code's own sanitization (`/foo bar` → `-foo-bar`) under `~/.claude/projects/`. The rule is duplicated in `encodeCwd()`; tests in `tests/parse.test.ts` pin the contract to catch upstream drift.
 2. Parses every `.jsonl` session file (concurrency capped at 32 to keep fd count sane): extracts metadata (`custom-title`, `tag`, `summary`, `last-prompt`, `agent-name`, `gitBranch`) and concatenates user/assistant message text into a searchable body (capped at 200KB/session).
 3. Streams TSV rows to `fzf`: `display+haystack \t sessionId \t path \t cwd`. `fzf` matches against the merged first column (display has ANSI; haystack is plain) and shows the display segment.
-4. On every keystroke, `fzf` re-invokes `claude-code-resume preview <id> <path> <query>` (an internal subcommand) for the focused row. The preview reads the transcript once and prints every message containing all query tokens (case-insensitive AND) with **±200 char windows and ANSI highlighting**. `alt-t` flips a per-invocation state file via the internal `toggle-mode` subcommand, switching to a full-transcript view with the same highlighting.
+4. On every keystroke, `fzf` re-invokes `ccresume preview <id> <path> <query>` (an internal subcommand) for the focused row. The preview reads the transcript once and prints every message containing all query tokens (case-insensitive AND) with **±200 char windows and ANSI highlighting**. `alt-t` flips a per-invocation state file via the internal `toggle-mode` subcommand, switching to a full-transcript view with the same highlighting.
 5. On `enter`, the action emits sessionId / path / cwd / both to stdout (or copies / execs `claude --resume`).
 
 Sidechain sessions (subagent transcripts), team-spawned sessions, and empty shells are filtered out — same behavior as `/resume`.
@@ -126,14 +128,14 @@ tests/parse.test.ts     bun test fixtures — pin encodeCwd, parsing, and highli
 package.json            build/install scripts
 ```
 
-No build step required to run from source. `bun run install:local` compiles a standalone binary to `~/.local/bin/claude-code-resume` if you want a Bun-free deploy.
+No build step required to run from source. `bun run install:local` compiles a standalone binary to `~/.local/bin/ccresume` if you want a Bun-free deploy.
 
 ## Development
 
 ```bash
 bun test          # run the test suite
 bun start         # run from source
-bun run build     # produce dist/claude-code-resume (compiled binary)
+bun run build     # produce dist/ccresume (compiled binary)
 ```
 
 ## License
