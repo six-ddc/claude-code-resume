@@ -657,9 +657,10 @@ async function runLauncher(args: Args) {
     '--with-nth=1',
     '--nth=1',
     '--accept-nth=2,3,4',
-    // Keep recency order on tied scores. Without this fzf reorders by
-    // match position, scrambling mtime DESC the moment you type.
-    '--tiebreak=index',
+    // begin: prefer matches closer to the start of the haystack, which
+    // floats title hits above body hits (title sits at column 0). index
+    // tiebreak after that keeps mtime DESC for everything else.
+    '--tiebreak=begin,index',
     // Keep title anchored at col 0; otherwise deep haystack matches
     // scroll the title off-screen.
     '--no-hscroll',
