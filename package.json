@@ -10,7 +10,7 @@
     "start": "bun src/claude-code-resume.ts",
     "test": "bun test",
     "build": "bun build --compile --minify --target=bun src/claude-code-resume.ts --outfile dist/ccresume",
-    "install:local": "bun run build && mkdir -p ~/.local/bin && cp dist/ccresume ~/.local/bin/ccresume && echo 'installed: ~/.local/bin/ccresume'",
+    "install:local": "bun run build && mkdir -p ~/.local/bin && rm -f ~/.local/bin/ccresume && cp dist/ccresume ~/.local/bin/ccresume && codesign --force --sign - ~/.local/bin/ccresume && echo 'installed: ~/.local/bin/ccresume'",
     "uninstall:local": "rm -f ~/.local/bin/ccresume && echo 'removed: ~/.local/bin/ccresume'"
   },
   "engines": {
