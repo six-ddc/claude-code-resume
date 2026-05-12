@@ -482,9 +482,10 @@ function parseArgs(rest: string[]): Args {
       ? resolve(ownValues.cwd)
       : process.cwd()
 
-  // --all default emits cwd+id so callers can `cd $cwd && claude
-  // --resume $id`. Single-cwd mode: id is enough.
-  if (action === null) action = all ? 'both' : 'id'
+  // Default: just resume — the resume action already cds into the
+  // session's cwd before exec, so --all and single-cwd both work. Users
+  // who want raw output for shell composition can pass --action id|both.
+  if (action === null) action = 'resume'
 
   return {
     cwd,
@@ -508,11 +509,10 @@ ccresume options:
   --all                  search every project on disk
   --cwd <path>           specific project cwd (default: $PWD)
   --no-transcript        skip transcript-body indexing (faster, metadata only)
-  --action <kind>        what to do with the selection
-                         kinds: id | path | cwd | both | resume | copy
-                                (default: 'id', or 'both' in --all)
-                                both → "<cwd><TAB><id>"
+  --action <kind>        what to do with the selection (default: 'resume')
+                         kinds: resume | id | path | cwd | both | copy
                                 resume → cd to cwd, exec claude --resume
+                                both   → "<cwd><TAB><id>"
   --dump                 print the TSV fed to fzf, then exit
   --version              print version
   -h, --help             show this help
@@ -550,9 +550,9 @@ Preview scroll:
   shift-↑ / ↓       one line
   PgUp / PgDn       one screen
 
-Shell composition:
-  claude --resume "$(ccresume)"             # single-cwd mode
-  read cwd id <<< "$(ccresume --all)"       # cd "$cwd" && claude --resume "$id"
+Shell composition (use --action to get raw output instead of resuming):
+  claude --resume "$(ccresume --action id)"             # print id only
+  read cwd id <<< "$(ccresume --all --action both)"     # cd "$cwd" && claude --resume "$id"
 
 Note: don't pass \`-q\` to ccresume; bare positionals are the query.
 

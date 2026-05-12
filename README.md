@@ -35,23 +35,23 @@ Requires `bun >= 1.1` and `fzf >= 0.40`. Clipboard support is auto-detected: `pb
 ## Usage
 
 ```bash
-ccresume                              # sessions in current cwd
+ccresume                              # pick + resume (cd to cwd, exec `claude --resume`)
 ccresume wsgi.input                   # pre-fill the query
-ccresume --all                        # every project on disk
+ccresume --all                        # every project on disk (resume still cds into its cwd)
 ccresume --cwd /path/to/proj          # specific cwd
 ccresume --no-transcript              # skip transcript-body indexing (faster, metadata only)
-ccresume --action resume              # exec `claude --resume <id>` on select
+ccresume --action id                  # print sessionId to stdout instead of resuming
 ccresume --action path                # print full .jsonl path
 ccresume --action copy                # copy sessionId to clipboard
 ccresume --dump                       # debug: print the TSV fed to fzf, then exit
 ccresume --version
 ```
 
-Default action: print `sessionId` to stdout. Compose freely:
+Default action: `resume` — pick a session, then directly exec `claude --resume <id>` in that session's cwd. Pass `--action id` (or `both`) when you want raw output for shell composition:
 
 ```bash
-claude --resume "$(ccresume)"                 # single-cwd mode
-read cwd id <<< "$(ccresume --all)"           # then: cd "$cwd" && claude --resume "$id"
+claude --resume "$(ccresume --action id)"             # explicit id output
+read cwd id <<< "$(ccresume --all --action both)"     # then: cd "$cwd" && claude --resume "$id"
 ```
 
 ## Passing options to fzf
