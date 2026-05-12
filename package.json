@@ -1,0 +1,20 @@
+{
+  "name": "claude-code-resume",
+  "version": "0.2.0",
+  "description": "fzf-style picker for Claude Code sessions with highlighted-match preview",
+  "type": "module",
+  "bin": {
+    "claude-code-resume": "./src/claude-code-resume.ts"
+  },
+  "scripts": {
+    "start": "bun src/claude-code-resume.ts",
+    "test": "bun test",
+    "build": "bun build --compile --minify --target=bun src/claude-code-resume.ts --outfile dist/claude-code-resume",
+    "install:local": "bun run build && mkdir -p ~/.local/bin && cp dist/claude-code-resume ~/.local/bin/claude-code-resume && echo 'installed: ~/.local/bin/claude-code-resume'",
+    "uninstall:local": "rm -f ~/.local/bin/claude-code-resume && echo 'removed: ~/.local/bin/claude-code-resume'"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "license": "MIT"
+}
