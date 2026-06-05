@@ -359,6 +359,7 @@ type TreeState = {
   rows: SessionRow[]
   searchFile: string
   dirLimits: Record<string, number>
+  collapsedDirs: Record<string, boolean>
   searchFzfArgs: string[]
   currentBranches: Record<string, string>
 }
@@ -532,13 +533,24 @@ function treeTsvLine(
   return [display, type, key, sessionId, path, cwd].map(tsvField).join('\t')
 }
 
-function directoryDisplay(group: DirectoryGroup, shownCount: number, visibleCount: number, queryActive: boolean, currentBranch: string): string {
+function directoryDisplay(
+  group: DirectoryGroup,
+  shownCount: number,
+  visibleCount: number,
+  queryActive: boolean,
+  currentBranch: string,
+  collapsed: boolean,
+): string {
   const total = group.rows.length
-  const count = queryActive
-    ? `${shownCount}/${visibleCount} matches`
-    : `${shownCount}/${total} shown`
+  const count = collapsed
+    ? queryActive
+      ? `${visibleCount} matches`
+      : `${total} sessions`
+    : queryActive
+      ? `${shownCount}/${visibleCount} matches`
+      : `${shownCount}/${total} shown`
   return [
-    BOLD + MAGENTA + '▾ ' + clip(shortenCwd(group.cwd), 96) + RESET,
+    BOLD + MAGENTA + (collapsed ? '▸ ' : '▾ ') + clip(shortenCwd(group.cwd), 96) + RESET,
     currentBranch ? CYAN + clip(currentBranch, 32) + RESET : '',
     DIM + count + RESET,
     DIM + 'last ' + formatAge(group.lastActivity) + ' ago' + RESET,
@@ -566,6 +578,7 @@ async function readTreeState(stateFile: string): Promise<TreeState> {
   if (state.version !== TREE_STATE_VERSION || !Array.isArray(state.rows) || typeof state.searchFile !== 'string') {
     throw new Error('invalid tree state')
   }
+  state.collapsedDirs ||= {}
   state.currentBranches ||= {}
   return state
 }
@@ -601,9 +614,12 @@ async function renderTreeTsv(state: TreeState, query: string): Promise<string> {
     if (!visibleRows || visibleRows.length === 0) continue
 
     const limit = Math.max(DEFAULT_DIR_LIMIT, state.dirLimits[group.cwd] || DEFAULT_DIR_LIMIT)
-    const shownRows = visibleRows.slice(0, limit)
+    const collapsed = state.collapsedDirs[group.cwd] === true
+    const shownRows = collapsed ? [] : visibleRows.slice(0, limit)
     const currentBranch = state.currentBranches[group.cwd] || ''
-    lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive, currentBranch), 'dir', group.cwd, '', '', group.cwd))
+    lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive, currentBranch, collapsed), 'dir', group.cwd, '', '', group.cwd))
+
+    if (collapsed) continue
 
     shownRows.forEach((r, idx) => {
       const hasMore = shownRows.length < visibleRows.length
@@ -635,6 +651,17 @@ async function runTreeEnter(stateFile: string, type: string, key: string) {
     console.log('accept')
     return
   }
+
+  if (type === 'dir') {
+    const state = await readTreeState(stateFile)
+    state.collapsedDirs ||= {}
+    if (state.collapsedDirs[key]) delete state.collapsedDirs[key]
+    else state.collapsedDirs[key] = true
+    await writeTreeState(stateFile, state)
+    console.log(`reload(${renderTreeCommand(stateFile)})+refresh-preview`)
+    return
+  }
+
   if (type !== 'more') {
     console.log('ignore')
     return
@@ -923,7 +950,7 @@ fzf env vars are respected unchanged:
   FZF_DEFAULT_COMMAND    unused (we provide our own stdin)
 
 Default bindings (override with --bind=key:action):
-  enter    more +10/select double-click more +10/select
+  enter    dir toggle/more +10/select double-click dir toggle/more +10/select
   ctrl-y   copy id         ctrl-/       flip preview position
   alt-t    toggle preview: filtered ↔ full
   esc      abort${noClip}
@@ -1000,6 +1027,7 @@ async function runLauncher(args: Args) {
     rows: rows.map(r => ({ ...r, body: '' })),
     searchFile,
     dirLimits: {},
+    collapsedDirs: {},
     searchFzfArgs: extractSearchFzfArgs(args.fzfPassthrough),
     currentBranches,
   }
