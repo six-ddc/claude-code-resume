@@ -12,6 +12,7 @@ Claude Code's `/resume` only does substring matching against title / branch / ta
 
 - **searches the full transcript body**, not just metadata
 - groups sessions by directory, showing the most recent 10 per directory by default
+- shows the current git branch on directory rows, and only shows a session's recorded branch when it differs
 - **highlights matches inline** in a preview pane (right side or bottom)
 - shows surrounding context per match so you can verify intent
 - scans every Claude Code project on disk by default
@@ -116,7 +117,7 @@ Search syntax is fzf's default: space-separated AND tokens, `'word` exact, `^pre
 
 1. Scans every Claude Code project directory under `~/.claude/projects/`, then collects UUID-named `.jsonl` session files from each project.
 2. Parses each session file (concurrency capped at 32 to keep fd count sane): extracts metadata (`custom-title`, `tag`, `summary`, `last-prompt`, `agent-name`, `gitBranch`) and concatenates user/assistant message text into a searchable body (capped at 200KB/session).
-3. Writes a per-picker tree state file, then runs fzf in `--disabled` mode as a display shell. Directory rows are always expanded, but each directory initially shows only the first 10 visible sessions plus a `[+10] show 10 more` row when more are available.
+3. Reads each directory's current git branch once, writes a per-picker tree state file, then runs fzf in `--disabled` mode as a display shell. Directory rows are always expanded, but each directory initially shows only the first 10 visible sessions plus a `[+10] show 10 more` row when more are available. Session rows only show their recorded `gitBranch` when it differs from the directory's current branch.
 4. On every query change, fzf reloads rows via the internal `render-tree` subcommand. That subcommand performs a full-session search by feeding metadata + transcript text into `fzf --filter`, so fzf's own query syntax and ranking are reused while the visible rows stay display-only.
 5. On a `[+10]` row, `enter` / double-click increases that directory's visible session limit by 10. On a session row, `enter` emits sessionId / path / cwd / both to stdout (or copies / execs `claude --resume`).
 6. The preview pane uses `preview-item`: directory rows show matching sessions when a query is active, otherwise recent sessions; session rows read the transcript and print matching message windows. `alt-t` flips a per-invocation state file via `toggle-mode`, switching session preview to a full-transcript view with the same highlighting.

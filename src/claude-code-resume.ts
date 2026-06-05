@@ -360,6 +360,7 @@ type TreeState = {
   searchFile: string
   dirLimits: Record<string, number>
   searchFzfArgs: string[]
+  currentBranches: Record<string, string>
 }
 
 type TreeItemType = 'dir' | 'session' | 'more'
@@ -494,6 +495,32 @@ function groupRowsByCwd(rows: SessionRow[]): DirectoryGroup[] {
     .sort((a, b) => b.lastActivity - a.lastActivity || shortenCwd(a.cwd).localeCompare(shortenCwd(b.cwd)))
 }
 
+async function currentGitBranch(cwd: string): Promise<string> {
+  if (!cwd) return ''
+  try {
+    const git = Bun.spawn(['git', '-C', cwd, 'branch', '--show-current'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [out, , code] = await Promise.all([
+      new Response(git.stdout).text(),
+      new Response(git.stderr).text(),
+      git.exited,
+    ])
+    if (code !== 0) return ''
+    return out.trim().split('\n')[0]?.trim() || ''
+  } catch {
+    return ''
+  }
+}
+
+async function currentBranchesByCwd(cwds: string[]): Promise<Record<string, string>> {
+  const pairs = await pMap([...new Set(cwds)].filter(Boolean), PARSE_CONCURRENCY, async cwd => {
+    return [cwd, await currentGitBranch(cwd)] as const
+  })
+  return Object.fromEntries(pairs.filter(([, branch]) => branch))
+}
+
 function treeTsvLine(
   display: string,
   type: TreeItemType,
@@ -505,25 +532,27 @@ function treeTsvLine(
   return [display, type, key, sessionId, path, cwd].map(tsvField).join('\t')
 }
 
-function directoryDisplay(group: DirectoryGroup, shownCount: number, visibleCount: number, queryActive: boolean): string {
+function directoryDisplay(group: DirectoryGroup, shownCount: number, visibleCount: number, queryActive: boolean, currentBranch: string): string {
   const total = group.rows.length
   const count = queryActive
     ? `${shownCount}/${visibleCount} matches`
     : `${shownCount}/${total} shown`
   return [
     BOLD + MAGENTA + '▾ ' + clip(shortenCwd(group.cwd), 96) + RESET,
+    currentBranch ? CYAN + clip(currentBranch, 32) + RESET : '',
     DIM + count + RESET,
     DIM + 'last ' + formatAge(group.lastActivity) + ' ago' + RESET,
   ].filter(Boolean).join('  ')
 }
 
-function sessionDisplay(r: SessionRow, isLast: boolean): string {
+function sessionDisplay(r: SessionRow, isLast: boolean, currentBranch: string): string {
   const prLabel = r.prNumber ? `PR #${r.prNumber}` : ''
+  const branchLabel = r.branch && currentBranch && r.branch !== currentBranch ? r.branch : ''
   return [
     DIM + '  ' + (isLast ? '└─' : '├─') + RESET,
     BOLD + clip(r.title || '(untitled)', 76) + RESET,
     DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
-    CYAN + clip(r.branch || '-', 32) + RESET,
+    branchLabel ? CYAN + clip(branchLabel, 32) + RESET : '',
     r.tag ? YELLOW + '#' + r.tag + RESET : '',
     prLabel ? GREEN + prLabel + RESET : '',
     DIM + r.messageCount + 'msg' + RESET,
@@ -537,6 +566,7 @@ async function readTreeState(stateFile: string): Promise<TreeState> {
   if (state.version !== TREE_STATE_VERSION || !Array.isArray(state.rows) || typeof state.searchFile !== 'string') {
     throw new Error('invalid tree state')
   }
+  state.currentBranches ||= {}
   return state
 }
 
@@ -572,11 +602,12 @@ async function renderTreeTsv(state: TreeState, query: string): Promise<string> {
 
     const limit = Math.max(DEFAULT_DIR_LIMIT, state.dirLimits[group.cwd] || DEFAULT_DIR_LIMIT)
     const shownRows = visibleRows.slice(0, limit)
-    lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive), 'dir', group.cwd, '', '', group.cwd))
+    const currentBranch = state.currentBranches[group.cwd] || ''
+    lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive, currentBranch), 'dir', group.cwd, '', '', group.cwd))
 
     shownRows.forEach((r, idx) => {
       const hasMore = shownRows.length < visibleRows.length
-      lines.push(treeTsvLine(sessionDisplay(r, !hasMore && idx === shownRows.length - 1), 'session', r.sessionId, r.sessionId, r.path, r.cwd))
+      lines.push(treeTsvLine(sessionDisplay(r, !hasMore && idx === shownRows.length - 1, currentBranch), 'session', r.sessionId, r.sessionId, r.path, r.cwd))
     })
     if (shownRows.length < visibleRows.length) {
       const moreCount = Math.min(DIR_LIMIT_STEP, visibleRows.length - shownRows.length)
@@ -962,6 +993,7 @@ async function runLauncher(args: Args) {
   const treeStateFile = join(tmpdir(), `ccresume-tree-${sessionToken}.json`)
   const searchFile = join(tmpdir(), `ccresume-search-${sessionToken}.tsv`)
   const groups = groupRowsByCwd(rows)
+  const currentBranches = await currentBranchesByCwd(groups.map(g => g.cwd))
   await Bun.write(searchFile, rows.map(r => `${sessionSearchText(r)}\t${r.sessionId}`).join('\n'))
   const treeState: TreeState = {
     version: TREE_STATE_VERSION,
@@ -969,6 +1001,7 @@ async function runLauncher(args: Args) {
     searchFile,
     dirLimits: {},
     searchFzfArgs: extractSearchFzfArgs(args.fzfPassthrough),
+    currentBranches,
   }
   await writeTreeState(treeStateFile, treeState)
 
