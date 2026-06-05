@@ -550,7 +550,7 @@ function directoryDisplay(
       ? `${shownCount}/${visibleCount} matches`
       : `${shownCount}/${total} shown`
   return [
-    BOLD + MAGENTA + (collapsed ? '▸ ' : '▾ ') + clip(shortenCwd(group.cwd), 96) + RESET,
+    MAGENTA + (collapsed ? '▸ ' : '▾ ') + clip(shortenCwd(group.cwd), 96) + RESET,
     currentBranch ? CYAN + clip(currentBranch, 32) + RESET : '',
     DIM + count + RESET,
     DIM + 'last ' + formatAge(group.lastActivity) + ' ago' + RESET,
@@ -562,7 +562,7 @@ function sessionDisplay(r: SessionRow, isLast: boolean, currentBranch: string): 
   const branchLabel = r.branch && currentBranch && r.branch !== currentBranch ? r.branch : ''
   return [
     DIM + '  ' + (isLast ? '└─' : '├─') + RESET,
-    BOLD + clip(r.title || '(untitled)', 76) + RESET,
+    clip(r.title || '(untitled)', 76),
     DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
     branchLabel ? CYAN + clip(branchLabel, 32) + RESET : '',
     r.tag ? YELLOW + '#' + r.tag + RESET : '',
@@ -794,6 +794,54 @@ function clipboardShellPipeline(): string | null {
   return argv.map(a => JSON.stringify(a)).join(' ')
 }
 
+export function findBatArgv(): string[] | null {
+  for (const name of ['bat', 'batcat']) {
+    if (Bun.which(name)) return [name]
+  }
+  return null
+}
+
+async function writeMarkdownPreview(text: string) {
+  const bat = findBatArgv()
+  if (!bat) {
+    stdout.write(text.endsWith('\n') ? text : text + '\n')
+    return
+  }
+
+  try {
+    const p = Bun.spawn(
+      [
+        ...bat,
+        '--language=markdown',
+        '--style=plain',
+        '--color=always',
+        '--paging=never',
+        '--wrap=never',
+        '--theme=ansi',
+      ],
+      {
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: { ...process.env, BAT_PAGER: 'cat' },
+      },
+    )
+    p.stdin.write(text)
+    await p.stdin.end()
+    const [out, , code] = await Promise.all([
+      new Response(p.stdout).text(),
+      new Response(p.stderr).text(),
+      p.exited,
+    ])
+    if (code === 0 && out) {
+      stdout.write(out)
+      return
+    }
+  } catch {}
+
+  stdout.write(text.endsWith('\n') ? text : text + '\n')
+}
+
 // ── arg parsing ──────────────────────────────────────────────────────────────
 type Args = {
   includeBody: boolean
@@ -964,6 +1012,9 @@ Preview scroll:
   mousewheel        scroll preview (default; terminal-dependent)
   shift-↑ / ↓       one line
   PgUp / PgDn       one screen
+
+Session preview:
+  uses bat/batcat for Markdown rendering when installed
 
 Shell composition (use --action to get raw output instead of resuming):
   claude --resume "$(ccresume --action id)"             # print id only
@@ -1210,7 +1261,7 @@ async function runToggleMode() {
 async function runPreview(sessionId: string, path: string, query: string) {
   // fzf passes empty {1}/{2} when no row is focused (e.g. 0 matches).
   if (!sessionId || !path) {
-    console.log(DIM + '(no session selected — refine your query)' + RESET)
+    await writeMarkdownPreview(DIM + '(no session selected — refine your query)' + RESET)
     return
   }
   const tokens = tokenize(query)
@@ -1223,10 +1274,11 @@ async function runPreview(sessionId: string, path: string, query: string) {
   try {
     ;[st, entries] = await Promise.all([stat(path), readAllEntries(path)])
   } catch (e) {
-    console.log(DIM + `(can't read ${path}: ${(e as Error).message})` + RESET)
+    await writeMarkdownPreview(DIM + `(can't read ${path}: ${(e as Error).message})` + RESET)
     return
   }
   const row = buildRow(entries, path, st, true)
+  const out: string[] = []
 
   const modeLabel =
     mode === 'full'
@@ -1258,8 +1310,8 @@ async function runPreview(sessionId: string, path: string, query: string) {
     .map(s => highlight(s, tokens))
     .join('\n')
 
-  console.log(header)
-  console.log(DIM + '─'.repeat(60) + RESET)
+  out.push(header)
+  out.push(DIM + '─'.repeat(60) + RESET)
 
   const showAll = mode === 'full' || tokens.length === 0
   let bytes = 0
@@ -1290,25 +1342,27 @@ async function runPreview(sessionId: string, path: string, query: string) {
     const ts = typeof e.timestamp === 'string'
       ? DIM + ' ' + new Date(e.timestamp).toISOString().slice(11, 19) + RESET
       : ''
-    console.log(`\n${role}${ts}`)
-    console.log(body)
+    out.push(`\n${role}${ts}`)
+    out.push(body)
 
     if (bytes > PREVIEW_MAX_BODY) {
-      console.log(DIM + `\n…truncated (>${formatBytes(PREVIEW_MAX_BODY)})` + RESET)
+      out.push(DIM + `\n…truncated (>${formatBytes(PREVIEW_MAX_BODY)})` + RESET)
       break
     }
   }
 
   if (tokens.length > 0) {
     if (showAll) {
-      console.log(DIM + `\n${matched} of ${printed} messages contain query` + RESET)
+      out.push(DIM + `\n${matched} of ${printed} messages contain query` + RESET)
     } else if (printed === 0) {
-      console.log(DIM + `\nno message body matches "${query}" (matched on metadata)` + RESET)
-      console.log(DIM + `press alt-t to view full transcript` + RESET)
+      out.push(DIM + `\nno message body matches "${query}" (matched on metadata)` + RESET)
+      out.push(DIM + `press alt-t to view full transcript` + RESET)
     } else {
-      console.log(DIM + `\n${printed}/${scanned} messages matched · alt-t for full` + RESET)
+      out.push(DIM + `\n${printed}/${scanned} messages matched · alt-t for full` + RESET)
     }
   }
+
+  await writeMarkdownPreview(out.join('\n') + '\n')
 }
 
 export function snippetAroundMatches(text: string, tokens: string[], contextChars = 200): string {

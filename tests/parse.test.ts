@@ -10,6 +10,7 @@ import {
   buildRow,
   readAllEntries,
   findClipboardArgv,
+  findBatArgv,
   VERSION,
 } from '../src/claude-code-resume.ts'
 import { writeFile, mkdtemp, rm } from 'node:fs/promises'
@@ -245,6 +246,13 @@ describe('readAllEntries + buildRow', () => {
 describe('findClipboardArgv', () => {
   test('returns null or an argv (platform-dependent)', () => {
     const r = findClipboardArgv()
+    expect(r === null || (Array.isArray(r) && r.length > 0)).toBe(true)
+  })
+})
+
+describe('findBatArgv', () => {
+  test('returns null or an argv', () => {
+    const r = findBatArgv()
     expect(r === null || (Array.isArray(r) && r.length > 0)).toBe(true)
   })
 })
