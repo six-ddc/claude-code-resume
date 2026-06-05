@@ -114,7 +114,7 @@ function extractMessageText(entry: Entry): string {
 export type SessionRow = {
   sessionId: string
   path: string
-  mtime: number
+  lastActivity: number
   created: number
   size: number
   title: string
@@ -156,9 +156,17 @@ export function buildRow(entries: Entry[], path: string, st: Pick<Stats, 'mtimeM
   let prNumber = 0
   let prUrl = ''
   let prRepository = ''
+  let lastTs = 0
 
   for (const e of entries) {
     const t = e.type
+    // Track the newest entry timestamp (any type) for sort + age display.
+    // Lines are append-ordered, but taking the max also shrugs off the
+    // occasional out-of-order sidechain/agent entry.
+    if (typeof e.timestamp === 'string') {
+      const ts = Date.parse(e.timestamp)
+      if (!Number.isNaN(ts) && ts > lastTs) lastTs = ts
+    }
     if (t === 'user' || t === 'assistant') {
       messageCount++
       if (e.isSidechain) isSidechain = true
@@ -222,7 +230,9 @@ export function buildRow(entries: Entry[], path: string, st: Pick<Stats, 'mtimeM
   return {
     sessionId,
     path,
-    mtime: st.mtimeMs,
+    // Newest message timestamp; fall back to file mtime for sessions
+    // whose entries carry no parseable timestamp.
+    lastActivity: lastTs || st.mtimeMs,
     created: st.birthtimeMs,
     size: st.size,
     title,
@@ -588,10 +598,10 @@ async function runLauncher(args: Args) {
       if (!r.firstPrompt && !r.customTitle) return false
       return true
     })
-    // Source sortLogs (types/logs.ts:319): mtime DESC, tiebreak created
-    // DESC — without it two sessions saved at the same minute flip
-    // order between runs.
-    .sort((a, b) => b.mtime - a.mtime || b.created - a.created)
+    // Last activity (newest message timestamp) DESC, tiebreak file
+    // birthtime DESC — without the tiebreak two sessions whose last
+    // message lands in the same minute flip order between runs.
+    .sort((a, b) => b.lastActivity - a.lastActivity || b.created - a.created)
 
   // ── TSV for fzf ─────────────────────────────────────────────────────────
   // fzf 0.70: once --with-nth is set, --nth indexes the *transformed*
@@ -604,7 +614,7 @@ async function runLauncher(args: Args) {
       const prLabel = r.prNumber ? `PR #${r.prNumber}` : ''
       const display = [
         BOLD + clip(r.title || '(untitled)', 80) + RESET,
-        DIM + formatAge(r.mtime).padStart(4) + ' ago' + RESET,
+        DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
         CYAN + clip(r.branch || '-', 36) + RESET,
         cwdShort ? MAGENTA + clip(cwdShort, 36) + RESET : '',
         r.tag ? YELLOW + '#' + r.tag + RESET : '',
@@ -659,7 +669,7 @@ async function runLauncher(args: Args) {
     '--accept-nth=2,3,4',
     // begin: prefer matches closer to the start of the haystack, which
     // floats title hits above body hits (title sits at column 0). index
-    // tiebreak after that keeps mtime DESC for everything else.
+    // tiebreak after that keeps last-activity DESC for everything else.
     '--tiebreak=begin,index',
     // Keep title anchored at col 0; otherwise deep haystack matches
     // scroll the title off-screen.
@@ -670,10 +680,15 @@ async function runLauncher(args: Args) {
     '--prompt=session> ',
     '--preview', previewCmd,
     '--preview-window', 'right:60%:wrap',
-    '--bind=ctrl-/:change-preview-window(down,50%,wrap|hidden|right,60%,wrap)',
+    // down,67% → preview takes the bottom 2/3, list the top 1/3.
+    '--bind=ctrl-/:change-preview-window(down,67%,wrap|hidden|right,60%,wrap)',
     `--bind=alt-t:execute-silent(${toggleCmd})+refresh-preview`,
+    // vim-style preview paging. Overrides fzf's default ctrl-b/ctrl-f
+    // (backward-char/forward-char in the query); the ←/→ arrows still
+    // move the query cursor.
+    '--bind=ctrl-b:preview-page-up,ctrl-f:preview-page-down',
     '--header',
-    `${rows.length} sessions · ctrl-y copy · ctrl-/ flip preview · alt-t toggle full/filtered`,
+    `${rows.length} sessions · ctrl-y copy · ctrl-b/f scroll · ctrl-/ flip preview · alt-t toggle full/filtered`,
   ]
 
   const copyPipeline = clipboardShellPipeline()
@@ -834,7 +849,7 @@ async function runPreview(sessionId: string, path: string, query: string) {
     row.agentSetting ? `${DIM}agent:${RESET}  ${row.agentSetting}` : '',
     row.customTitle ? `${DIM}custom:${RESET} ${row.customTitle}` : '',
     row.summary ? `${DIM}sum:${RESET}    ${clip(row.summary, 200)}` : '',
-    `${DIM}meta:${RESET}   ${row.messageCount}msg · ${formatBytes(row.size)} · ${formatAge(row.mtime)} ago`,
+    `${DIM}meta:${RESET}   ${row.messageCount}msg · ${formatBytes(row.size)} · ${formatAge(row.lastActivity)} ago`,
   ]
     .filter(Boolean)
     .map(s => highlight(s, tokens))

@@ -175,6 +175,51 @@ describe('readAllEntries + buildRow', () => {
     }
   })
 
+  test('lastActivity is the newest entry timestamp (any type)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'claude-code-resume-test-'))
+    const file = join(dir, '00000000-0000-0000-0000-000000000003.jsonl')
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        message: { content: 'first' },
+        timestamp: '2025-01-01T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'reply' }] },
+        timestamp: '2025-01-01T01:00:00.000Z',
+      }),
+      // A non-message entry written last carries the newest timestamp.
+      JSON.stringify({ type: 'tag', tag: 't', timestamp: '2025-01-01T02:00:00.000Z' }),
+    ]
+    await writeFile(file, lines.join('\n'), 'utf8')
+    try {
+      const entries = await readAllEntries(file)
+      const row = buildRow(entries, file, { mtimeMs: 1_000, birthtimeMs: 500, size: 10 }, false)
+      // Newest wins over file mtime (1_000) and over earlier messages.
+      expect(row.lastActivity).toBe(Date.parse('2025-01-01T02:00:00.000Z'))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('lastActivity falls back to file mtime when no entry has a timestamp', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'claude-code-resume-test-'))
+    const file = join(dir, '00000000-0000-0000-0000-000000000004.jsonl')
+    const lines = [
+      JSON.stringify({ type: 'summary', summary: 's' }),
+      JSON.stringify({ type: 'user', message: { content: 'no ts here' } }),
+    ]
+    await writeFile(file, lines.join('\n'), 'utf8')
+    try {
+      const entries = await readAllEntries(file)
+      const row = buildRow(entries, file, { mtimeMs: 4_242, birthtimeMs: 500, size: 10 }, false)
+      expect(row.lastActivity).toBe(4_242)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('handles BOM and skips malformed lines', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'claude-code-resume-test-'))
     const file = join(dir, '00000000-0000-0000-0000-000000000002.jsonl')
