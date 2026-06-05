@@ -2,20 +2,18 @@
 // ccresume (claude-code-resume) — fzf-style picker for Claude Code sessions
 //
 // ccresume options:
-//   --all                  search every project on disk
-//   --cwd <path>           specific project cwd (default: $PWD)
 //   --no-transcript        skip transcript-body indexing (faster, metadata only)
 //   --action <kind>        what to do with the selection
 //                          (id|path|cwd|both|resume|copy)
-//   --dump                 print the TSV fed to fzf, then exit
+//   --dump                 print the tree TSV fed to fzf, then exit
 //   --version              print version
 //   -h, --help             show help
 //
 // Unknown flags pass through to fzf. FZF_DEFAULT_OPTS is respected.
 //
-// Self-dispatches: `ccresume preview <sessionId> <jsonlPath> <query>` is
-// invoked by fzf for the preview pane; `ccresume toggle-mode` flips
-// preview filter/full mode. Internal — don't invoke directly.
+// Self-dispatches into internal subcommands for fzf reload, tree enter,
+// preview rendering, preview layout, clipboard copy, and preview mode
+// toggling. Internal — don't invoke directly.
 
 import { mkdir, readFile, readdir, stat, unlink } from 'node:fs/promises'
 import type { Stats } from 'node:fs'
@@ -30,6 +28,11 @@ const PROJECTS_ROOT = join(homedir(), '.claude', 'projects')
 const PARSE_CONCURRENCY = 32
 const MAX_SEARCH_BODY = 200_000
 const PREVIEW_MAX_BODY = 500_000
+const TREE_STATE_VERSION = 1
+const DEFAULT_DIR_LIMIT = 10
+const DIR_LIMIT_STEP = 10
+const PREVIEW_RIGHT = 'right,60%,wrap'
+const PREVIEW_DOWN = 'down,67%,wrap'
 
 const userArgs = argv.slice(2)
 // Compiled binary mode: Bun's --compile substitutes argv[1] with a
@@ -305,9 +308,8 @@ async function collectSessionFiles(projectDirs: string[]): Promise<string[]> {
   return out
 }
 
-// Bounded-concurrency map. Without this, --all on a user with hundreds
-// of session files would open hundreds of fds at once (macOS default
-// ulimit is 256).
+// Bounded-concurrency map. Without this, users with hundreds of session
+// files would open hundreds of fds at once (macOS default ulimit is 256).
 async function pMap<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length)
   let next = 0
@@ -351,6 +353,363 @@ const GREEN = '\x1b[32m'
 const MAGENTA = '\x1b[35m'
 const HL = '\x1b[1;30;43m' // black on yellow
 
+// ── tree picker state/rendering ──────────────────────────────────────────────
+type TreeState = {
+  version: typeof TREE_STATE_VERSION
+  rows: SessionRow[]
+  searchFile: string
+  dirLimits: Record<string, number>
+  searchFzfArgs: string[]
+}
+
+type TreeItemType = 'dir' | 'session' | 'more'
+
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'"
+}
+
+function tsvField(s: string): string {
+  return s.replace(/[\t\r\n]/g, ' ')
+}
+
+function renderTreeCommand(stateFile: string): string {
+  return `${SELF_INVOCATION} render-tree ${shellQuote(stateFile)}`
+}
+
+function extractSearchFzfArgs(fzfArgs: string[]): string[] {
+  const out: string[] = []
+  for (const arg of fzfArgs) {
+    if (
+      arg === '-e' ||
+      arg === '--exact' ||
+      arg === '+x' ||
+      arg === '--no-extended' ||
+      arg === '-i' ||
+      arg === '--ignore-case' ||
+      arg === '+i' ||
+      arg === '--no-ignore-case' ||
+      arg === '--smart-case' ||
+      arg === '--literal' ||
+      arg === '+s' ||
+      arg === '--no-sort' ||
+      arg.startsWith('--algo=') ||
+      arg.startsWith('--scheme=') ||
+      arg.startsWith('--tiebreak=')
+    ) {
+      out.push(arg)
+    }
+  }
+  return out
+}
+
+function hasFzfOption(fzfArgs: string[], opt: string): boolean {
+  return fzfArgs.some(arg => arg === opt || arg.startsWith(opt + '='))
+}
+
+function sessionSearchText(r: SessionRow): string {
+  const prInfo = r.prNumber ? `pr #${r.prNumber} ${r.prRepository} ${r.prUrl}` : ''
+  return [
+    r.title,
+    r.customTitle,
+    r.agentName,
+    r.agentSetting,
+    r.summary,
+    r.firstPrompt,
+    r.branch,
+    r.cwd,
+    r.tag ? `#${r.tag}` : '',
+    r.sessionId,
+    prInfo,
+    r.body,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/[\t\r\n\0]/g, ' ')
+}
+
+async function fzfFilterRows(rows: SessionRow[], query: string, searchFzfArgs: string[], searchFile?: string): Promise<SessionRow[]> {
+  const q = query.trim()
+  if (!q) return rows
+  if (rows.length === 0) return []
+
+  const input = searchFile
+    ? await Bun.file(searchFile).text()
+    : rows.map(r => `${sessionSearchText(r)}\t${r.sessionId}`).join('\n')
+  const fzf = Bun.spawn(
+    [
+      'fzf',
+      '--filter',
+      query,
+      '--delimiter=\t',
+      '--nth=1',
+      '--accept-nth=2',
+      ...searchFzfArgs,
+    ],
+    {
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, FZF_DEFAULT_OPTS: '', FZF_DEFAULT_OPTS_FILE: '' },
+    },
+  )
+  fzf.stdin.write(input)
+  await fzf.stdin.end()
+  const [out, err, code] = await Promise.all([
+    new Response(fzf.stdout).text(),
+    new Response(fzf.stderr).text(),
+    fzf.exited,
+  ])
+  if (code !== 0 && code !== 1) {
+    throw new Error(err.trim() || `fzf --filter exited ${code}`)
+  }
+  if (!out.trim()) return []
+
+  const byId = new Map(rows.map(r => [r.sessionId, r] as const))
+  return out
+    .split('\n')
+    .map(id => byId.get(id.trim()))
+    .filter((r): r is SessionRow => Boolean(r))
+}
+
+type DirectoryGroup = {
+  cwd: string
+  rows: SessionRow[]
+  lastActivity: number
+}
+
+function groupRowsByCwd(rows: SessionRow[]): DirectoryGroup[] {
+  const map = new Map<string, SessionRow[]>()
+  for (const r of rows) {
+    const cwd = r.cwd || dirname(r.path)
+    const group = map.get(cwd)
+    if (group) group.push(r)
+    else map.set(cwd, [r])
+  }
+  return [...map.entries()]
+    .map(([cwd, groupRows]) => ({
+      cwd,
+      rows: groupRows,
+      lastActivity: Math.max(...groupRows.map(r => r.lastActivity)),
+    }))
+    .sort((a, b) => b.lastActivity - a.lastActivity || shortenCwd(a.cwd).localeCompare(shortenCwd(b.cwd)))
+}
+
+function treeTsvLine(
+  display: string,
+  type: TreeItemType,
+  key: string,
+  sessionId = '',
+  path = '',
+  cwd = '',
+): string {
+  return [display, type, key, sessionId, path, cwd].map(tsvField).join('\t')
+}
+
+function directoryDisplay(group: DirectoryGroup, shownCount: number, visibleCount: number, queryActive: boolean): string {
+  const total = group.rows.length
+  const count = queryActive
+    ? `${shownCount}/${visibleCount} matches`
+    : `${shownCount}/${total} shown`
+  return [
+    BOLD + MAGENTA + '▾ ' + clip(shortenCwd(group.cwd), 96) + RESET,
+    DIM + count + RESET,
+    DIM + 'last ' + formatAge(group.lastActivity) + ' ago' + RESET,
+  ].filter(Boolean).join('  ')
+}
+
+function sessionDisplay(r: SessionRow, isLast: boolean): string {
+  const prLabel = r.prNumber ? `PR #${r.prNumber}` : ''
+  return [
+    DIM + '  ' + (isLast ? '└─' : '├─') + RESET,
+    BOLD + clip(r.title || '(untitled)', 76) + RESET,
+    DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
+    CYAN + clip(r.branch || '-', 32) + RESET,
+    r.tag ? YELLOW + '#' + r.tag + RESET : '',
+    prLabel ? GREEN + prLabel + RESET : '',
+    DIM + r.messageCount + 'msg' + RESET,
+  ]
+    .filter(Boolean)
+    .join('  ')
+}
+
+async function readTreeState(stateFile: string): Promise<TreeState> {
+  const state = JSON.parse(await Bun.file(stateFile).text()) as TreeState
+  if (state.version !== TREE_STATE_VERSION || !Array.isArray(state.rows) || typeof state.searchFile !== 'string') {
+    throw new Error('invalid tree state')
+  }
+  return state
+}
+
+async function writeTreeState(stateFile: string, state: TreeState): Promise<void> {
+  await Bun.write(stateFile, JSON.stringify(state))
+}
+
+async function renderTreeTsv(state: TreeState, query: string): Promise<string> {
+  const q = query.trim()
+  const matchedRows = await fzfFilterRows(state.rows, q, state.searchFzfArgs, state.searchFile)
+  if (matchedRows.length === 0) return ''
+
+  const queryActive = q.length > 0
+  const matchedByCwd = new Map<string, SessionRow[]>()
+  const bestRankByCwd = new Map<string, number>()
+  for (let rank = 0; rank < matchedRows.length; rank++) {
+    const r = matchedRows[rank]!
+    const cwd = r.cwd || dirname(r.path)
+    const group = matchedByCwd.get(cwd)
+    if (group) group.push(r)
+    else matchedByCwd.set(cwd, [r])
+    if (!bestRankByCwd.has(cwd)) bestRankByCwd.set(cwd, rank)
+  }
+
+  const allGroups = groupRowsByCwd(state.rows).sort((a, b) => {
+    if (!queryActive) return 0
+    return (bestRankByCwd.get(a.cwd) ?? Number.MAX_SAFE_INTEGER) - (bestRankByCwd.get(b.cwd) ?? Number.MAX_SAFE_INTEGER)
+  })
+  const lines: string[] = []
+  for (const group of allGroups) {
+    const visibleRows = matchedByCwd.get(group.cwd)
+    if (!visibleRows || visibleRows.length === 0) continue
+
+    const limit = Math.max(DEFAULT_DIR_LIMIT, state.dirLimits[group.cwd] || DEFAULT_DIR_LIMIT)
+    const shownRows = visibleRows.slice(0, limit)
+    lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive), 'dir', group.cwd, '', '', group.cwd))
+
+    shownRows.forEach((r, idx) => {
+      const hasMore = shownRows.length < visibleRows.length
+      lines.push(treeTsvLine(sessionDisplay(r, !hasMore && idx === shownRows.length - 1), 'session', r.sessionId, r.sessionId, r.path, r.cwd))
+    })
+    if (shownRows.length < visibleRows.length) {
+      const moreCount = Math.min(DIR_LIMIT_STEP, visibleRows.length - shownRows.length)
+      const remaining = visibleRows.length - shownRows.length
+      const display = [
+        DIM + '  └─' + RESET,
+        GREEN + `[+${moreCount}]` + RESET,
+        `show ${moreCount} more`,
+        DIM + `(${remaining} remaining)` + RESET,
+      ].join('  ')
+      lines.push(treeTsvLine(display, 'more', group.cwd, '', '', group.cwd))
+    }
+  }
+  return lines.join('\n')
+}
+
+async function runRenderTree(stateFile: string) {
+  const state = await readTreeState(stateFile)
+  const tsv = await renderTreeTsv(state, process.env.FZF_QUERY || '')
+  if (tsv) stdout.write(tsv + '\n')
+}
+
+async function runTreeEnter(stateFile: string, type: string, key: string) {
+  if (type === 'session') {
+    console.log('accept')
+    return
+  }
+  if (type !== 'more') {
+    console.log('ignore')
+    return
+  }
+
+  const state = await readTreeState(stateFile)
+  state.dirLimits ||= {}
+  state.dirLimits[key] = Math.max(DEFAULT_DIR_LIMIT, state.dirLimits[key] || DEFAULT_DIR_LIMIT) + DIR_LIMIT_STEP
+  await writeTreeState(stateFile, state)
+  console.log(`reload(${renderTreeCommand(stateFile)})+refresh-preview`)
+}
+
+async function runTreeCopy(type: string, sessionId: string) {
+  if (type !== 'session' || !sessionId) {
+    console.log('bell')
+    return
+  }
+  const cmd = findClipboardArgv()
+  if (!cmd) {
+    console.log('change-header:no clipboard backend found')
+    return
+  }
+  Bun.spawn(cmd, { stdin: new Response(sessionId).body! })
+  console.log('abort')
+}
+
+async function runDirectoryPreview(stateFile: string, cwd: string, query: string) {
+  const state = await readTreeState(stateFile)
+  const rows = state.rows.filter(r => (r.cwd || dirname(r.path)) === cwd)
+  const q = query.trim()
+  const visibleRows = q
+    ? (await fzfFilterRows(state.rows, q, state.searchFzfArgs, state.searchFile))
+        .filter(r => (r.cwd || dirname(r.path)) === cwd)
+    : rows
+  const lastActivity = rows.length ? Math.max(...rows.map(r => r.lastActivity)) : 0
+
+  console.log(BOLD + MAGENTA + shortenCwd(cwd) + RESET)
+  console.log(
+    `${DIM}type:${RESET}   directory  ${DIM}sessions:${RESET} ${q ? `${visibleRows.length}/${rows.length} matched` : rows.length}  ` +
+      `${DIM}last:${RESET} ${lastActivity ? formatAge(lastActivity) + ' ago' : '-'}`,
+  )
+  if (q) {
+    console.log(DIM + 'showing matching sessions in this directory' + RESET)
+  }
+  console.log(DIM + '─'.repeat(60) + RESET)
+
+  if (rows.length === 0) {
+    console.log(DIM + '(no sessions in this directory)' + RESET)
+    return
+  }
+  if (visibleRows.length === 0) {
+    console.log(DIM + '(no sessions in this directory match the query)' + RESET)
+    return
+  }
+
+  for (const r of visibleRows.slice(0, 24)) {
+    const parts = [
+      DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
+      CYAN + clip(r.branch || '-', 28) + RESET,
+      BOLD + clip(r.title || '(untitled)', 90) + RESET,
+      r.tag ? YELLOW + '#' + r.tag + RESET : '',
+      DIM + r.messageCount + 'msg' + RESET,
+    ].filter(Boolean)
+    console.log(parts.join('  '))
+  }
+  if (visibleRows.length > 24) {
+    console.log(DIM + `\n…${visibleRows.length - 24} more` + RESET)
+  }
+}
+
+async function runPreviewItem(stateFile: string, type: string, key: string, sessionId: string, path: string) {
+  const query = process.env.FZF_QUERY || ''
+  if (type === 'dir') {
+    await runDirectoryPreview(stateFile, key, query)
+    return
+  }
+  if (type === 'more') {
+    await runDirectoryPreview(stateFile, key, query)
+    return
+  }
+  if (type === 'session') {
+    await runPreview(sessionId, path, query)
+    return
+  }
+  console.log(DIM + '(no item selected)' + RESET)
+}
+
+function autoPreviewWindow(cols: number, lines: number): string {
+  if (!Number.isFinite(cols) || !Number.isFinite(lines) || cols <= 0 || lines <= 0) {
+    return PREVIEW_RIGHT
+  }
+
+  const previewCols = Math.floor(cols * 0.6)
+  const listCols = cols - previewCols
+  const cellRatio = cols / Math.max(1, lines)
+  return listCols >= 44 && previewCols >= 60 && cellRatio >= 2.5
+    ? PREVIEW_RIGHT
+    : PREVIEW_DOWN
+}
+
+async function runPreviewLayout() {
+  const cols = Number(process.env.FZF_COLUMNS || process.env.COLUMNS || 0)
+  const lines = Number(process.env.FZF_LINES || process.env.LINES || 0)
+  console.log(`change-preview-window(${autoPreviewWindow(cols, lines)})`)
+}
+
 // ── clipboard (cross-platform) ───────────────────────────────────────────────
 // Returns argv to pipe stdin to the system clipboard, or null if no
 // backend is installed. Picks the first available on the platform.
@@ -379,8 +738,6 @@ function clipboardShellPipeline(): string | null {
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 type Args = {
-  cwd: string | null
-  all: boolean
   includeBody: boolean
   action: 'id' | 'path' | 'cwd' | 'both' | 'resume' | 'copy'
   query: string
@@ -392,8 +749,8 @@ const VALID_ACTIONS = ['id', 'path', 'cwd', 'both', 'resume', 'copy'] as const
 
 // Our flags. Anything else with a leading '-' is forwarded to fzf
 // verbatim. Bare positionals become the query.
-const OWN_BOOL_FLAGS = new Set(['--all', '--no-transcript', '--dump'])
-const OWN_VALUE_FLAGS = new Set(['--cwd', '--action'])
+const OWN_BOOL_FLAGS = new Set(['--no-transcript', '--dump'])
+const OWN_VALUE_FLAGS = new Set(['--action'])
 
 function die(msg: string): never {
   console.error(`ccresume: ${msg}`)
@@ -446,7 +803,7 @@ function parseArgs(rest: string[]): Args {
       }
       continue
     }
-    if (tok.startsWith('-') && tok.length > 1) {
+    if ((tok.startsWith('-') || tok.startsWith('+')) && tok.length > 1) {
       // Unknown flag → fzf. Value-bearing fzf flags must use `--k=v`
       // form (or sit after `--`), since we can't tell value flags from
       // boolean ones without an exhaustive list.
@@ -463,8 +820,6 @@ function parseArgs(rest: string[]): Args {
     const result = nodeParseArgs({
       args: own,
       options: {
-        all: { type: 'boolean' },
-        cwd: { type: 'string' },
         'no-transcript': { type: 'boolean' },
         action: { type: 'string' },
         dump: { type: 'boolean' },
@@ -485,21 +840,12 @@ function parseArgs(rest: string[]): Args {
     action = ownValues.action as Args['action']
   }
 
-  const all = ownValues.all === true
-  const cwd: string | null = all
-    ? null
-    : typeof ownValues.cwd === 'string'
-      ? resolve(ownValues.cwd)
-      : process.cwd()
-
   // Default: just resume — the resume action already cds into the
-  // session's cwd before exec, so --all and single-cwd both work. Users
-  // who want raw output for shell composition can pass --action id|both.
+  // session's cwd before exec. Users who want raw output for shell
+  // composition can pass --action id|both.
   if (action === null) action = 'resume'
 
   return {
-    cwd,
-    all,
     includeBody: ownValues['no-transcript'] !== true,
     action,
     query: positionals.join(' '),
@@ -510,20 +856,18 @@ function parseArgs(rest: string[]): Args {
 
 function printHelp() {
   const noClip = clipboardShellPipeline() ? '' : `\n  (no clipboard backend found; install pbcopy/wl-copy/xclip/xsel for ctrl-y)`
-  console.log(`ccresume ${VERSION} — fzf picker for Claude Code sessions
+  console.log(`ccresume ${VERSION} — fzf tree picker for Claude Code sessions
 
 Usage:
   ccresume [options] [query] [-- ...fzf args]
 
 ccresume options:
-  --all                  search every project on disk
-  --cwd <path>           specific project cwd (default: $PWD)
   --no-transcript        skip transcript-body indexing (faster, metadata only)
   --action <kind>        what to do with the selection (default: 'resume')
                          kinds: resume | id | path | cwd | both | copy
                                 resume → cd to cwd, exec claude --resume
                                 both   → "<cwd><TAB><id>"
-  --dump                 print the TSV fed to fzf, then exit
+  --dump                 print the tree TSV fed to fzf, then exit
   --version              print version
   -h, --help             show this help
 
@@ -531,6 +875,8 @@ Pass-through to fzf:
   Any unknown flag is forwarded to fzf verbatim. fzf options that take
   a value must use --flag=value form (or sit after \`--\`), because
   ccresume can't tell unfamiliar value flags from boolean ones.
+  The preview layout is auto-selected from terminal width/height unless
+  you pass --preview-window explicitly.
 
   Examples:
     ccresume --preview-window=down:70%:wrap
@@ -546,8 +892,9 @@ fzf env vars are respected unchanged:
   FZF_DEFAULT_COMMAND    unused (we provide our own stdin)
 
 Default bindings (override with --bind=key:action):
-  enter    select          ctrl-/   flip preview position
-  ctrl-y   copy id         alt-t    toggle preview: filtered ↔ full
+  enter    more +10/select double-click more +10/select
+  ctrl-y   copy id         ctrl-/       flip preview position
+  alt-t    toggle preview: filtered ↔ full
   esc      abort${noClip}
 
 Search syntax (fzf default):
@@ -562,20 +909,24 @@ Preview scroll:
 
 Shell composition (use --action to get raw output instead of resuming):
   claude --resume "$(ccresume --action id)"             # print id only
-  read cwd id <<< "$(ccresume --all --action both)"     # cd "$cwd" && claude --resume "$id"
+  read cwd id <<< "$(ccresume --action both)"           # cd "$cwd" && claude --resume "$id"
 
 Note: don't pass \`-q\` to ccresume; bare positionals are the query.
 
 Internal subcommands (used by fzf bindings, do not invoke directly):
-  ccresume preview <sessionId> <path> <query>
+  ccresume preview-item <stateFile> <type> <key> <sessionId> <path>
+  ccresume preview-layout
+  ccresume render-tree <stateFile>
+  ccresume tree-enter <stateFile> <type> <key>
+  ccresume tree-copy <type> <sessionId>
   ccresume toggle-mode`)
 }
 
 // ── launcher ─────────────────────────────────────────────────────────────────
 async function runLauncher(args: Args) {
-  const projectDirs = await listProjectDirs(args.cwd)
+  const projectDirs = await listProjectDirs(null)
   if (projectDirs.length === 0) {
-    console.error(`no sessions found for ${args.cwd ?? 'any cwd'}`)
+    console.error('no sessions found')
     exit(1)
   }
   const files = await collectSessionFiles(projectDirs)
@@ -603,104 +954,89 @@ async function runLauncher(args: Args) {
     // message lands in the same minute flip order between runs.
     .sort((a, b) => b.lastActivity - a.lastActivity || b.created - a.created)
 
-  // ── TSV for fzf ─────────────────────────────────────────────────────────
-  // fzf 0.70: once --with-nth is set, --nth indexes the *transformed*
-  // line, so "show col-A but search col-A+col-B in separate columns"
-  // doesn't work. Merge display + haystack into one column; sessionId,
-  // path, cwd ride in trailing fields surfaced via --accept-nth.
-  const tsv = rows
-    .map(r => {
-      const cwdShort = args.all && r.cwd ? shortenCwd(r.cwd) : ''
-      const prLabel = r.prNumber ? `PR #${r.prNumber}` : ''
-      const display = [
-        BOLD + clip(r.title || '(untitled)', 80) + RESET,
-        DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
-        CYAN + clip(r.branch || '-', 36) + RESET,
-        cwdShort ? MAGENTA + clip(cwdShort, 36) + RESET : '',
-        r.tag ? YELLOW + '#' + r.tag + RESET : '',
-        prLabel ? GREEN + prLabel + RESET : '',
-        DIM + formatBytes(r.size) + RESET,
-        DIM + r.messageCount + 'msg' + RESET,
-      ]
-        .filter(Boolean)
-        .join('  ')
+  // Per-invocation state file in tmpdir keeps concurrent pickers from
+  // fighting over the same mode/tree state. /tmp is auto-cleaned by
+  // the OS; we still unlink on exit for tidiness.
+  const sessionToken = Math.random().toString(36).slice(2, 10)
+  const previewStateFile = join(tmpdir(), `ccresume-preview-${sessionToken}`)
+  const treeStateFile = join(tmpdir(), `ccresume-tree-${sessionToken}.json`)
+  const searchFile = join(tmpdir(), `ccresume-search-${sessionToken}.tsv`)
+  const groups = groupRowsByCwd(rows)
+  await Bun.write(searchFile, rows.map(r => `${sessionSearchText(r)}\t${r.sessionId}`).join('\n'))
+  const treeState: TreeState = {
+    version: TREE_STATE_VERSION,
+    rows: rows.map(r => ({ ...r, body: '' })),
+    searchFile,
+    dirLimits: {},
+    searchFzfArgs: extractSearchFzfArgs(args.fzfPassthrough),
+  }
+  await writeTreeState(treeStateFile, treeState)
 
-      const prInfo = r.prNumber ? `pr #${r.prNumber} ${r.prRepository}` : ''
-      const haystack = [
-        r.customTitle,
-        r.agentName,
-        r.agentSetting,
-        r.summary,
-        r.firstPrompt,
-        r.cwd,
-        prInfo,
-        r.body,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .replace(/[\t\r\n]/g, ' ')
-
-      const merged = haystack ? `${display}  ${DIM}│  ${haystack}${RESET}` : display
-      return [merged, r.sessionId, r.path, r.cwd].join('\t')
-    })
-    .join('\n')
-
+  const tsv = await renderTreeTsv(treeState, args.query)
   if (args.dump) {
-    stdout.write(tsv + '\n')
+    if (tsv) stdout.write(tsv + '\n')
+    try {
+      await unlink(treeStateFile)
+    } catch {}
+    try {
+      await unlink(searchFile)
+    } catch {}
     return
   }
 
-  // Per-invocation state file in tmpdir keeps concurrent pickers from
-  // fighting over the same alt-t mode. /tmp is auto-cleaned by the OS;
-  // we still unlink on exit for tidiness.
-  const sessionToken = Math.random().toString(36).slice(2, 10)
-  const stateFile = join(tmpdir(), `ccresume-${sessionToken}`)
-
-  const previewCmd = `${SELF_INVOCATION} preview {2} {3} {q}`
+  const renderCmd = renderTreeCommand(treeStateFile)
+  const enterCmd = `${SELF_INVOCATION} tree-enter ${shellQuote(treeStateFile)} {2} {3}`
+  const copyCmd = `${SELF_INVOCATION} tree-copy {2} {4}`
+  const previewCmd = `${SELF_INVOCATION} preview-item ${shellQuote(treeStateFile)} {2} {3} {4} {5}`
+  const previewLayoutCmd = `${SELF_INVOCATION} preview-layout`
   const toggleCmd = `${SELF_INVOCATION} toggle-mode`
+  const userPreviewWindow = hasFzfOption(args.fzfPassthrough, '--preview-window')
 
   // Defaults appear BEFORE pass-through so user flags win (fzf is
   // last-wins for most flags).
   const defaultFzfArgs: string[] = [
+    '--disabled',
     '--ansi',
     '--delimiter=\t',
     '--with-nth=1',
-    '--nth=1',
-    '--accept-nth=2,3,4',
-    // begin: prefer matches closer to the start of the haystack, which
-    // floats title hits above body hits (title sits at column 0). index
-    // tiebreak after that keeps last-activity DESC for everything else.
-    '--tiebreak=begin,index',
-    // Keep title anchored at col 0; otherwise deep haystack matches
-    // scroll the title off-screen.
+    '--accept-nth=4,5,6',
+    '--track',
     '--no-hscroll',
+    '--ellipsis=',
     '--height=100%',
     '--layout=reverse',
     '--info=inline',
-    '--prompt=session> ',
+    '--prompt=tree> ',
     '--preview', previewCmd,
-    '--preview-window', 'right:60%:wrap',
+    '--preview-window', autoPreviewWindow(Number(process.stdout.columns || 0), Number(process.stdout.rows || 0)),
+    `--bind=change:reload(${renderCmd})`,
+    `--bind=enter:transform(${enterCmd})`,
+    `--bind=double-click:transform(${enterCmd})`,
     // down,67% → preview takes the bottom 2/3, list the top 1/3.
-    '--bind=ctrl-/:change-preview-window(down,67%,wrap|hidden|right,60%,wrap)',
+    `--bind=ctrl-/:change-preview-window(${PREVIEW_DOWN}|hidden|${PREVIEW_RIGHT})`,
     `--bind=alt-t:execute-silent(${toggleCmd})+refresh-preview`,
     // vim-style preview paging. Overrides fzf's default ctrl-b/ctrl-f
     // (backward-char/forward-char in the query); the ←/→ arrows still
     // move the query cursor.
     '--bind=ctrl-b:preview-page-up,ctrl-f:preview-page-down',
     '--header',
-    `${rows.length} sessions · ctrl-y copy · ctrl-b/f scroll · ctrl-/ flip preview · alt-t toggle full/filtered`,
+    `${groups.length} dirs · ${rows.length} sessions · enter/double-click [+${DIR_LIMIT_STEP}]/select · ctrl-y copy · ctrl-b/f scroll · ctrl-/ preview · alt-t full/filtered`,
   ]
 
-  const copyPipeline = clipboardShellPipeline()
-  if (copyPipeline) {
-    defaultFzfArgs.push(`--bind=ctrl-y:execute-silent(printf %s {2} | ${copyPipeline})+abort`)
+  if (!userPreviewWindow) {
+    defaultFzfArgs.push(
+      `--bind=start:transform(${previewLayoutCmd})`,
+      `--bind=resize:transform(${previewLayoutCmd})`,
+    )
   }
+
+  if (clipboardShellPipeline()) defaultFzfArgs.push(`--bind=ctrl-y:transform(${copyCmd})`)
 
   const fzfArgs = [...defaultFzfArgs, ...args.fzfPassthrough]
   if (args.query) fzfArgs.push('-q', args.query)
 
   // We don't touch FZF_DEFAULT_OPTS — user's dotfile defaults apply.
-  const env = { ...process.env, CCRESUME_STATE_FILE: stateFile }
+  const env = { ...process.env, CCRESUME_STATE_FILE: previewStateFile }
 
   try {
     const fzf = Bun.spawn(['fzf', ...fzfArgs], {
@@ -751,7 +1087,13 @@ async function runLauncher(args: Args) {
     }
   } finally {
     try {
-      await unlink(stateFile)
+      await unlink(previewStateFile)
+    } catch {}
+    try {
+      await unlink(treeStateFile)
+    } catch {}
+    try {
+      await unlink(searchFile)
     } catch {}
   }
 }
@@ -946,6 +1288,20 @@ if (import.meta.main) {
   if (sub === 'preview') {
     const [, sessionId, path, ...queryParts] = userArgs
     await runPreview(sessionId!, path!, queryParts.join(' '))
+  } else if (sub === 'preview-item') {
+    const [, stateFile, type, key, sessionId, path] = userArgs
+    await runPreviewItem(stateFile!, type || '', key || '', sessionId || '', path || '')
+  } else if (sub === 'preview-layout') {
+    await runPreviewLayout()
+  } else if (sub === 'render-tree') {
+    const [, stateFile] = userArgs
+    await runRenderTree(stateFile!)
+  } else if (sub === 'tree-enter') {
+    const [, stateFile, type, key] = userArgs
+    await runTreeEnter(stateFile!, type || '', key || '')
+  } else if (sub === 'tree-copy') {
+    const [, type, sessionId] = userArgs
+    await runTreeCopy(type || '', sessionId || '')
   } else if (sub === 'toggle-mode') {
     await runToggleMode()
   } else {

@@ -2,7 +2,7 @@
 
 > Installs as the `ccresume` command — short prefix, no collision with `claude`.
 
-fzf-style picker for Claude Code sessions, with **highlighted-match preview** so you can confirm the right session before selecting it.
+fzf-style tree picker for Claude Code sessions, grouped by cwd with **highlighted-match preview** so you can confirm the right session before selecting it.
 
 Inspired by Claude Code's built-in `/resume` picker, but adds a live preview pane that scrolls through every message body matching your query — so you don't have to open the wrong session twice.
 
@@ -11,9 +11,10 @@ Inspired by Claude Code's built-in `/resume` picker, but adds a live preview pan
 Claude Code's `/resume` only does substring matching against title / branch / tag / PR — it can't tell you *why* a session matched, and it doesn't look inside the transcript at all. This tool:
 
 - **searches the full transcript body**, not just metadata
+- groups sessions by directory, showing the most recent 10 per directory by default
 - **highlights matches inline** in a preview pane (right side or bottom)
 - shows surrounding context per match so you can verify intent
-- defaults to the current cwd (mirrors Claude Code's per-project session storage)
+- scans every Claude Code project on disk by default
 
 ## Install
 
@@ -37,13 +38,11 @@ Requires `bun >= 1.1` and `fzf >= 0.40`. Clipboard support is auto-detected: `pb
 ```bash
 ccresume                              # pick + resume (cd to cwd, exec `claude --resume`)
 ccresume wsgi.input                   # pre-fill the query
-ccresume --all                        # every project on disk (resume still cds into its cwd)
-ccresume --cwd /path/to/proj          # specific cwd
 ccresume --no-transcript              # skip transcript-body indexing (faster, metadata only)
 ccresume --action id                  # print sessionId to stdout instead of resuming
 ccresume --action path                # print full .jsonl path
 ccresume --action copy                # copy sessionId to clipboard
-ccresume --dump                       # debug: print the TSV fed to fzf, then exit
+ccresume --dump                       # debug: print the tree TSV fed to fzf, then exit
 ccresume --version
 ```
 
@@ -51,12 +50,14 @@ Default action: `resume` — pick a session, then directly exec `claude --resume
 
 ```bash
 claude --resume "$(ccresume --action id)"             # explicit id output
-read cwd id <<< "$(ccresume --all --action both)"     # then: cd "$cwd" && claude --resume "$id"
+read cwd id <<< "$(ccresume --action both)"           # then: cd "$cwd" && claude --resume "$id"
 ```
 
 ## Passing options to fzf
 
 Unknown flags are forwarded to fzf verbatim. fzf options that take a value must use `--flag=value` form (or sit after `--`), because ccresume can't tell unfamiliar value flags from boolean ones.
+
+By default, the preview pane auto-switches between right-side and bottom layouts from the current terminal width/height ratio, and recalculates on terminal resize. Passing `--preview-window=...` disables that auto layout for the invocation.
 
 ```bash
 # layout
@@ -66,7 +67,7 @@ ccresume --height=80% --layout=default
 # matching behavior
 ccresume --exact                    # exact-match only
 ccresume --algo=v1                  # faster, less smart matching
-ccresume --case-sensitive
+ccresume +i                         # case-sensitive
 
 # input/UI
 ccresume --no-mouse                 # disable mouse capture
@@ -86,6 +87,7 @@ Common fzf options worth knowing about:
 | `--bind=KEY:ACTION` | rebind any key; see `man fzf` for actions |
 | `--exact` | only exact-substring matches |
 | `--algo=v1` | older, faster fuzzy algorithm |
+| `+i` / `--no-ignore-case` | case-sensitive matching |
 | `--tac` | reverse input order |
 | `--no-mouse` | disable mouse, recover native terminal text selection |
 | `--color=bw` | monochrome |
@@ -98,7 +100,7 @@ Common fzf options worth knowing about:
 
 | key      | action                                    |
 |----------|-------------------------------------------|
-| `enter`  | select                                    |
+| `enter` / double-click | `[+10]` row: show 10 more; session: select |
 | `ctrl-/` | flip preview position (right / bottom / hidden) |
 | `ctrl-y` | copy sessionId to clipboard + abort       |
 | `alt-t`  | toggle preview: filtered ↔ full transcript |
@@ -112,11 +114,12 @@ Search syntax is fzf's default: space-separated AND tokens, `'word` exact, `^pre
 
 ## How it works
 
-1. Resolves the project dir from cwd using Claude Code's own sanitization (`/foo bar` → `-foo-bar`) under `~/.claude/projects/`. The rule is duplicated in `encodeCwd()`; tests in `tests/parse.test.ts` pin the contract to catch upstream drift.
-2. Parses every `.jsonl` session file (concurrency capped at 32 to keep fd count sane): extracts metadata (`custom-title`, `tag`, `summary`, `last-prompt`, `agent-name`, `gitBranch`) and concatenates user/assistant message text into a searchable body (capped at 200KB/session).
-3. Streams TSV rows to `fzf`: `display+haystack \t sessionId \t path \t cwd`. `fzf` matches against the merged first column (display has ANSI; haystack is plain) and shows the display segment.
-4. On every keystroke, `fzf` re-invokes `ccresume preview <id> <path> <query>` (an internal subcommand) for the focused row. The preview reads the transcript once and prints every message containing all query tokens (case-insensitive AND) with **±200 char windows and ANSI highlighting**. `alt-t` flips a per-invocation state file via the internal `toggle-mode` subcommand, switching to a full-transcript view with the same highlighting.
-5. On `enter`, the action emits sessionId / path / cwd / both to stdout (or copies / execs `claude --resume`).
+1. Scans every Claude Code project directory under `~/.claude/projects/`, then collects UUID-named `.jsonl` session files from each project.
+2. Parses each session file (concurrency capped at 32 to keep fd count sane): extracts metadata (`custom-title`, `tag`, `summary`, `last-prompt`, `agent-name`, `gitBranch`) and concatenates user/assistant message text into a searchable body (capped at 200KB/session).
+3. Writes a per-picker tree state file, then runs fzf in `--disabled` mode as a display shell. Directory rows are always expanded, but each directory initially shows only the first 10 visible sessions plus a `[+10] show 10 more` row when more are available.
+4. On every query change, fzf reloads rows via the internal `render-tree` subcommand. That subcommand performs a full-session search by feeding metadata + transcript text into `fzf --filter`, so fzf's own query syntax and ranking are reused while the visible rows stay display-only.
+5. On a `[+10]` row, `enter` / double-click increases that directory's visible session limit by 10. On a session row, `enter` emits sessionId / path / cwd / both to stdout (or copies / execs `claude --resume`).
+6. The preview pane uses `preview-item`: directory rows show matching sessions when a query is active, otherwise recent sessions; session rows read the transcript and print matching message windows. `alt-t` flips a per-invocation state file via `toggle-mode`, switching session preview to a full-transcript view with the same highlighting.
 
 Sidechain sessions (subagent transcripts), team-spawned sessions, and empty shells are filtered out — same behavior as `/resume`.
 
