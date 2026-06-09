@@ -339,6 +339,17 @@ function formatAge(mtime: number): string {
   return `${(sec / 86400) | 0}d`
 }
 
+function ageLabel(mtime: number): string {
+  return `${formatAge(mtime)} ago`
+}
+
+function ageColumnWidth(rows: SessionRow[], withAgo: boolean): number {
+  return rows.reduce((max, r) => {
+    const label = withAgo ? ageLabel(r.lastActivity) : formatAge(r.lastActivity)
+    return Math.max(max, label.length)
+  }, 0)
+}
+
 function clip(s: string, n: number): string {
   if (s.length <= n) return s
   return s.slice(0, n - 1) + '…'
@@ -553,17 +564,16 @@ function directoryDisplay(
     MAGENTA + (collapsed ? '▸ ' : '▾ ') + clip(shortenCwd(group.cwd), 96) + RESET,
     currentBranch ? CYAN + clip(currentBranch, 32) + RESET : '',
     DIM + count + RESET,
-    DIM + 'last ' + formatAge(group.lastActivity) + ' ago' + RESET,
+    DIM + 'last' + RESET + ' ' + formatAge(group.lastActivity),
   ].filter(Boolean).join('  ')
 }
 
-function sessionDisplay(r: SessionRow, isLast: boolean, currentBranch: string): string {
+function sessionDisplay(r: SessionRow, isLast: boolean, currentBranch: string, ageWidth: number): string {
   const prLabel = r.prNumber ? `PR #${r.prNumber}` : ''
   const branchLabel = r.branch && currentBranch && r.branch !== currentBranch ? r.branch : ''
   return [
-    DIM + '  ' + (isLast ? '└─' : '├─') + RESET,
+    DIM + (isLast ? '└─' : '├─') + RESET + ' ' + formatAge(r.lastActivity).padStart(ageWidth),
     clip(r.title || '(untitled)', 76),
-    DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
     branchLabel ? CYAN + clip(branchLabel, 32) + RESET : '',
     r.tag ? YELLOW + '#' + r.tag + RESET : '',
     prLabel ? GREEN + prLabel + RESET : '',
@@ -608,7 +618,13 @@ async function renderTreeTsv(state: TreeState, query: string): Promise<string> {
     if (!queryActive) return 0
     return (bestRankByCwd.get(a.cwd) ?? Number.MAX_SAFE_INTEGER) - (bestRankByCwd.get(b.cwd) ?? Number.MAX_SAFE_INTEGER)
   })
-  const lines: string[] = []
+  const renderGroups: Array<{
+    group: DirectoryGroup
+    visibleRows: SessionRow[]
+    shownRows: SessionRow[]
+    collapsed: boolean
+    currentBranch: string
+  }> = []
   for (const group of allGroups) {
     const visibleRows = matchedByCwd.get(group.cwd)
     if (!visibleRows || visibleRows.length === 0) continue
@@ -617,19 +633,25 @@ async function renderTreeTsv(state: TreeState, query: string): Promise<string> {
     const collapsed = state.collapsedDirs[group.cwd] === true
     const shownRows = collapsed ? [] : visibleRows.slice(0, limit)
     const currentBranch = state.currentBranches[group.cwd] || ''
+    renderGroups.push({ group, visibleRows, shownRows, collapsed, currentBranch })
+  }
+
+  const ageWidth = ageColumnWidth(renderGroups.flatMap(g => g.shownRows), false)
+  const lines: string[] = []
+  for (const { group, visibleRows, shownRows, collapsed, currentBranch } of renderGroups) {
     lines.push(treeTsvLine(directoryDisplay(group, shownRows.length, visibleRows.length, queryActive, currentBranch, collapsed), 'dir', group.cwd, '', '', group.cwd))
 
     if (collapsed) continue
 
     shownRows.forEach((r, idx) => {
       const hasMore = shownRows.length < visibleRows.length
-      lines.push(treeTsvLine(sessionDisplay(r, !hasMore && idx === shownRows.length - 1, currentBranch), 'session', r.sessionId, r.sessionId, r.path, r.cwd))
+      lines.push(treeTsvLine(sessionDisplay(r, !hasMore && idx === shownRows.length - 1, currentBranch, ageWidth), 'session', r.sessionId, r.sessionId, r.path, r.cwd))
     })
     if (shownRows.length < visibleRows.length) {
       const moreCount = Math.min(DIR_LIMIT_STEP, visibleRows.length - shownRows.length)
       const remaining = visibleRows.length - shownRows.length
       const display = [
-        DIM + '  └─' + RESET,
+        DIM + '└─' + RESET,
         GREEN + `[+${moreCount}]` + RESET,
         `show ${moreCount} more`,
         DIM + `(${remaining} remaining)` + RESET,
@@ -701,7 +723,7 @@ async function runDirectoryPreview(stateFile: string, cwd: string, query: string
   console.log(BOLD + MAGENTA + shortenCwd(cwd) + RESET)
   console.log(
     `${DIM}type:${RESET}   directory  ${DIM}sessions:${RESET} ${q ? `${visibleRows.length}/${rows.length} matched` : rows.length}  ` +
-      `${DIM}last:${RESET} ${lastActivity ? formatAge(lastActivity) + ' ago' : '-'}`,
+      `${DIM}last:${RESET} ${lastActivity ? ageLabel(lastActivity) : '-'}`,
   )
   if (q) {
     console.log(DIM + 'showing matching sessions in this directory' + RESET)
@@ -717,9 +739,11 @@ async function runDirectoryPreview(stateFile: string, cwd: string, query: string
     return
   }
 
-  for (const r of visibleRows.slice(0, 24)) {
+  const previewRows = visibleRows.slice(0, 24)
+  const ageWidth = ageColumnWidth(previewRows, true)
+  for (const r of previewRows) {
     const parts = [
-      DIM + formatAge(r.lastActivity).padStart(4) + ' ago' + RESET,
+      ageLabel(r.lastActivity).padStart(ageWidth),
       CYAN + clip(r.branch || '-', 28) + RESET,
       BOLD + clip(r.title || '(untitled)', 90) + RESET,
       r.tag ? YELLOW + '#' + r.tag + RESET : '',
