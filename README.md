@@ -6,6 +6,8 @@ fzf-style tree picker for Claude Code sessions, grouped by cwd with **highlighte
 
 Inspired by Claude Code's built-in `/resume` picker, but adds a live preview pane that scrolls through every message body matching your query — so you don't have to open the wrong session twice.
 
+![ccresume in action](./demo.png)
+
 ## Why
 
 Claude Code's `/resume` only does substring matching against title / branch / tag / PR — it can't tell you *why* a session matched, and it doesn't look inside the transcript at all. This tool:
@@ -43,6 +45,8 @@ ccresume wsgi.input                   # pre-fill the query
 ccresume --no-transcript              # skip transcript-body indexing (faster, metadata only)
 ccresume --action id                  # print sessionId to stdout instead of resuming
 ccresume --action path                # print full .jsonl path
+ccresume --action cwd                 # print the session's cwd
+ccresume --action both                # print "<cwd>\t<sessionId>" (tab-separated)
 ccresume --action copy                # copy sessionId to clipboard
 ccresume --dump                       # debug: print the tree TSV fed to fzf, then exit
 ccresume --version
